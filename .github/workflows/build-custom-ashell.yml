@@ -31,7 +31,7 @@ jobs:
 
           sed -i '' '1i\
           #include "ios_error.h"\
-          ' SVT-AV1-HDR/Source/App/EncApp/EbAppMain.c
+          ' SVT-AV1-HDR/Source/App/enc_app_main.c
 
           mkdir -p SVT-AV1-HDR/build-ios && cd SVT-AV1-HDR/build-ios
           cmake .. \
