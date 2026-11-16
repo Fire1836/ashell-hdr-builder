@@ -9,19 +9,16 @@ jobs:
     steps:
       - name: Clone a-Shell Directly
         run: |
-           git config --global url."https://github.com".insteadOf "git@github.com:"
-           git clone --depth 1 https://github.comholzschu/a-shell.git
+           git clone --depth 1 https://github.com/holzschu/a-shell
            cd a-shell
-           git -c submodule.cpython.update=none submodule update --init --recursive --depth 1
+           git -c submodule.cpython.update=none submodule update --init --depth 1
            ./get_frameworks.sh || true
 
       - name: Setup Dependencies and ios_system
         run: |
-          brew install nasm pkg-config
-          curl -L -o ios_system.zip https://github.com/holzschu/ios_system/archive/refs/tags/v3.0.7.zip
-          unzip -o ios_system.zip -d ios_system_release
-          mkdir -p "$GITHUB_WORKSPACE/custom_dylibs"
-          mkdir -p "$GITHUB_WORKSPACE/sysroot/include" "$GITHUB_WORKSPACE/sysroot/lib"
+           brew install nasm pkg-config
+           mkdir -p "$GITHUB_WORKSPACE/custom_dylibs"
+           mkdir -p "$GITHUB_WORKSPACE/sysroot/include" "$GITHUB_WORKSPACE/sysroot/lib"
 
       - name: Build SVT-AV1-HDR (Library + CLI)
         run: |
