@@ -35,7 +35,29 @@ jobs:
           if [ -n "$IOS_ERROR_H" ]; then
             cp "$IOS_ERROR_H" "$GITHUB_WORKSPACE/ios_headers/"
           else
-            curl -fsSL "https://githubusercontent.com" -o "$GITHUB_WORKSPACE/ios_headers/ios_error.h"
+            cat << 'EOF' > "$GITHUB_WORKSPACE/ios_headers/ios_error.h"
+          #ifndef ios_error_h
+          #define ios_error_h
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <unistd.h>
+          #ifdef __cplusplus
+          extern "C" {
+          #endif
+          extern __thread FILE* thread_stdin;
+          extern __thread FILE* thread_stdout;
+          extern __thread FILE* thread_stderr;
+          #define stdin thread_stdin
+          #define stdout thread_stdout
+          #define stderr thread_stderr
+          extern void ios_exit(int errorCode) __dead2;
+          #define exit ios_exit
+          #define _exit ios_exit
+          #ifdef __cplusplus
+          }
+          #endif
+          #endif
+          EOF
           fi
           IOS_INC_DIR="$GITHUB_WORKSPACE/ios_headers"
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
