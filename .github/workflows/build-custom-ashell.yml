@@ -44,6 +44,7 @@ jobs:
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
             -DCMAKE_OSX_SYSROOT="$SDK_PATH" \
+            -DCMAKE_MACOSX_BUNDLE=OFF \
             -DCMAKE_C_COMPILER_WORKS=1 \
             -DCMAKE_CXX_COMPILER_WORKS=1 \
             -DCMAKE_BUILD_TYPE=Release \
