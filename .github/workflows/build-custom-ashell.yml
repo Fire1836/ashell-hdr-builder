@@ -9,9 +9,11 @@ jobs:
     steps:
       - name: Clone a-Shell Directly
         run: |
-          git clone --depth 1 --shallow-submodules --recursive https://github.com/holzschu/a-shell
-          cd a-shell
-          ./get_frameworks.sh || true
+           git config --global url."https://github.com".insteadOf "git@github.com:"
+           git clone --depth 1 https://github.comholzschu/a-shell.git
+           cd a-shell
+           git -c submodule.cpython.update=none submodule update --init --recursive --depth 1
+           ./get_frameworks.sh || true
 
       - name: Setup Dependencies and ios_system
         run: |
