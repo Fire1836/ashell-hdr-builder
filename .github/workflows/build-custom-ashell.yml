@@ -28,10 +28,12 @@ jobs:
           IOS_SYS_FRAMEWORK=$(find "$GITHUB_WORKSPACE" -name "ios_system.framework" | head -n 1)
           IOS_SYS_DIR=$(dirname "$IOS_SYS_FRAMEWORK")
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
-
+          
+          MAIN_C=$(find SVT-AV1-HDR -iname "*app*main*.c" | head -n 1)
+          echo "Found main file: $MAIN_C"
           sed -i '' '1i\
           #include "ios_error.h"\
-          ' SVT-AV1-HDR/Source/App/enc_app_main.c
+          ' "$MAIN_C"
 
           mkdir -p SVT-AV1-HDR/build-ios && cd SVT-AV1-HDR/build-ios
           cmake .. \
