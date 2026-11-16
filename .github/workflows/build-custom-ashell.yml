@@ -16,14 +16,14 @@ jobs:
       - name: Setup Dependencies and ios_system
         run: |
           brew install nasm pkg-config
-          curl -L -o ios_system.zip https://github.com
+          curl -L -o ios_system.zip https://github.com/holzschu/ios_system/archive/refs/tags/v3.0.7.zip
           unzip -o ios_system.zip -d ios_system_release
           mkdir -p "$GITHUB_WORKSPACE/custom_dylibs"
           mkdir -p "$GITHUB_WORKSPACE/sysroot/include" "$GITHUB_WORKSPACE/sysroot/lib"
 
       - name: Build SVT-AV1-HDR (Library + CLI)
         run: |
-          git clone --depth 1 https://github.com/holzschu/a-shell
+          git clone --depth 1 https://github.com/juliobbv-p/svt-av1-hdr
           IOS_ERR_HEADER=$(find "$GITHUB_WORKSPACE" -name "ios_error.h" | head -n 1)
           IOS_INC_DIR=$(dirname "$IOS_ERR_HEADER")
           IOS_SYS_FRAMEWORK=$(find "$GITHUB_WORKSPACE" -name "ios_system.framework" | head -n 1)
@@ -60,7 +60,7 @@ jobs:
 
       - name: Build Native FFmpeg & FFprobe with libsvtav1
         run: |
-          git clone --depth 1 https://ffmpeg.org
+          git clone --depth 1 https://git.ffmpeg.org/ffmpeg.git
           cd ffmpeg
           IOS_ERR_HEADER=$(find "$GITHUB_WORKSPACE" -name "ios_error.h" | head -n 1)
           IOS_INC_DIR=$(dirname "$IOS_ERR_HEADER")
@@ -106,7 +106,7 @@ jobs:
 
       - name: Build Native 7-Zip (7zz)
         run: |
-          git clone --depth 1 https://github.com
+          git clone --depth 1 https://github.com/ip7z/7zip
           IOS_ERR_HEADER=$(find "$GITHUB_WORKSPACE" -name "ios_error.h" | head -n 1)
           IOS_INC_DIR=$(dirname "$IOS_ERR_HEADER")
           IOS_SYS_FRAMEWORK=$(find "$GITHUB_WORKSPACE" -name "ios_system.framework" | head -n 1)
@@ -176,3 +176,14 @@ jobs:
             archive
 
           mkdir -p build/Payload
+          
+          cp -r build/a-Shell.xcarchive/Products/Applications/a-Shell.app build/Payload/
+          mkdir -p build/Payload/a-Shell.app/Frameworks
+          cp "$GITHUB_WORKSPACE/custom_dylibs/"*.dylib build/Payload/a-Shell.app/Frameworks/
+          cd build && zip -r "$GITHUB_WORKSPACE/a-Shell-Custom-HDR.ipa" Payload
+
+      - name: Upload Finished IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: a-Shell-Custom-HDR
+          path: a-Shell-Custom-HDR.ipa
