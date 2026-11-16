@@ -136,15 +136,16 @@ jobs:
 
           cp "$GITHUB_WORKSPACE/sysroot/lib"/libav*.dylib "$GITHUB_WORKSPACE/sysroot/lib"/libsw*.dylib "$GITHUB_WORKSPACE/custom_dylibs/"
 
-          COMMON_OBJS=$(find fftools -name "*.o" ! -name "ffmpeg.o" ! -name "ffprobe.o")
+          FFMPEG_OBJS=$(find fftools -name "*.o" ! -name "ffprobe.o")
+          FFPROBE_OBJS=$(find fftools -name "*.o" ! -name "ffmpeg*.o" ! -name "sync_queue.o" ! -name "thread_queue.o" ! -path "fftools/graph/*")
 
           xcrun -sdk iphoneos clang -shared -arch arm64 -mios-version-min=15.0 \
-            fftools/ffmpeg.o $COMMON_OBJS -o "$GITHUB_WORKSPACE/custom_dylibs/libffmpeg.dylib" \
+            $FFMPEG_OBJS -o "$GITHUB_WORKSPACE/custom_dylibs/libffmpeg.dylib" \
             -L"$GITHUB_WORKSPACE/sysroot/lib" -lavdevice -lavfilter -lavformat -lavcodec -lswresample -lswscale -lavutil -lSvtAv1Enc \
             -F"$IOS_SYS_DIR" -framework ios_system -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -framework CoreVideo -framework CoreFoundation -framework Security -lz -lbz2 -liconv
 
           xcrun -sdk iphoneos clang -shared -arch arm64 -mios-version-min=15.0 \
-            fftools/ffprobe.o $COMMON_OBJS -o "$GITHUB_WORKSPACE/custom_dylibs/libffprobe.dylib" \
+            $FFPROBE_OBJS -o "$GITHUB_WORKSPACE/custom_dylibs/libffprobe.dylib" \
             -L"$GITHUB_WORKSPACE/sysroot/lib" -lavdevice -lavfilter -lavformat -lavcodec -lswresample -lswscale -lavutil -lSvtAv1Enc \
             -F"$IOS_SYS_DIR" -framework ios_system -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -framework CoreVideo -framework CoreFoundation -framework Security -lz -lbz2 -liconv
 
