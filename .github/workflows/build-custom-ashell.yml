@@ -11,8 +11,8 @@ jobs:
         run: |
            git clone --depth 1 https://github.com/holzschu/a-shell
            cd a-shell
-           git -c submodule.cpython.update=none submodule update --init --depth 1
-           ./get_frameworks.sh || true
+           git submodule update --init SwiftTerm
+           ./downloadFrameworks.sh --jobs 4
 
       - name: Setup Dependencies and ios_system
         run: |
@@ -23,24 +23,30 @@ jobs:
       - name: Build SVT-AV1-HDR (Library + CLI)
         run: |
           git clone --depth 1 https://github.com/juliobbv-p/svt-av1-hdr
-          IOS_ERR_HEADER=$(find "$GITHUB_WORKSPACE" -name "ios_error.h" | head -n 1)
-          IOS_INC_DIR=$(dirname "$IOS_ERR_HEADER")
-          IOS_SYS_FRAMEWORK=$(find "$GITHUB_WORKSPACE" -name "ios_system.framework" | head -n 1)
+          
+          # Target the ios-arm64 slice specifically (not simulator/macos slices)
+          IOS_SYS_FRAMEWORK=$(find "$GITHUB_WORKSPACE/a-shell/xcfs" -path "*/ios-arm64/ios_system.framework" | head -n 1)
           IOS_SYS_DIR=$(dirname "$IOS_SYS_FRAMEWORK")
+          IOS_INC_DIR="$IOS_SYS_FRAMEWORK/Headers"
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           
-          MAIN_C=$(find SVT-AV1-HDR -iname "*app*main*.c" | head -n 1)
+          echo "Using framework dir: $IOS_SYS_DIR"
+          echo "Using headers dir: $IOS_INC_DIR"
+
+          MAIN_C=$(find svt-av1-hdr -iname "*app*main*.c" | head -n 1)
           echo "Found main file: $MAIN_C"
           sed -i '' '1i\
           #include "ios_error.h"\
           ' "$MAIN_C"
 
-          mkdir -p SVT-AV1-HDR/build-ios && cd SVT-AV1-HDR/build-ios
+          mkdir -p svt-av1-hdr/build-ios && cd svt-av1-hdr/build-ios
           cmake .. \
             -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
             -DCMAKE_OSX_SYSROOT="$SDK_PATH" \
+            -DCMAKE_C_COMPILER_WORKS=1 \
+            -DCMAKE_CXX_COMPILER_WORKS=1 \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/sysroot" \
             -DBUILD_SHARED_LIBS=ON \
@@ -51,6 +57,7 @@ jobs:
 
           cmake --build . --config Release -j$(sysctl -n hw.ncpu)
           cmake --install . --config Release
+
 
           cp ../Bin/Release/libSvtAv1Enc*.dylib "$GITHUB_WORKSPACE/custom_dylibs/"
           cp ../Bin/Release/SvtAv1EncApp "$GITHUB_WORKSPACE/custom_dylibs/libSvtAv1EncApp.dylib"
