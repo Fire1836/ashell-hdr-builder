@@ -1,0 +1,178 @@
+name: Build Custom a-Shell (SVT-AV1-HDR + FFmpeg + 7zz)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    runs-on: macos-latest
+    steps:
+      - name: Clone a-Shell Directly
+        run: |
+          git clone --depth 1 --shallow-submodules --recursive https://github.com/holzschu/a-shell
+          cd a-shell
+          ./get_frameworks.sh || true
+
+      - name: Setup Dependencies and ios_system
+        run: |
+          brew install nasm pkg-config
+          curl -L -o ios_system.zip https://github.com
+          unzip -o ios_system.zip -d ios_system_release
+          mkdir -p "$GITHUB_WORKSPACE/custom_dylibs"
+          mkdir -p "$GITHUB_WORKSPACE/sysroot/include" "$GITHUB_WORKSPACE/sysroot/lib"
+
+      - name: Build SVT-AV1-HDR (Library + CLI)
+        run: |
+          git clone --depth 1 https://github.com/holzschu/a-shell
+          IOS_ERR_HEADER=$(find "$GITHUB_WORKSPACE" -name "ios_error.h" | head -n 1)
+          IOS_INC_DIR=$(dirname "$IOS_ERR_HEADER")
+          IOS_SYS_FRAMEWORK=$(find "$GITHUB_WORKSPACE" -name "ios_system.framework" | head -n 1)
+          IOS_SYS_DIR=$(dirname "$IOS_SYS_FRAMEWORK")
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+
+          sed -i '' '1i\
+          #include "ios_error.h"\
+          ' svt-av1-hdr/Source/App/EncApp/EbAppMain.c
+
+          mkdir -p svt-av1-hdr/build-ios && cd svt-av1-hdr/build-ios
+          cmake .. \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+            -DCMAKE_OSX_SYSROOT="$SDK_PATH" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/sysroot" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_APPS=ON \
+            -DSVT_AV1_LTO=OFF \
+            -DCMAKE_C_FLAGS="-I$IOS_INC_DIR" \
+            -DCMAKE_EXE_LINKER_FLAGS="-shared -F$IOS_SYS_DIR -framework ios_system"
+
+          cmake --build . --config Release -j$(sysctl -n hw.ncpu)
+          cmake --install . --config Release
+
+          cp ../Bin/Release/libSvtAv1Enc*.dylib "$GITHUB_WORKSPACE/custom_dylibs/"
+          cp ../Bin/Release/SvtAv1EncApp "$GITHUB_WORKSPACE/custom_dylibs/libSvtAv1EncApp.dylib"
+
+          DYLIB_NAME=$(basename $(ls "$GITHUB_WORKSPACE/custom_dylibs"/libSvtAv1Enc.*.dylib | head -n 1))
+          install_name_tool -id "@rpath/$DYLIB_NAME" "$GITHUB_WORKSPACE/custom_dylibs/$DYLIB_NAME"
+          install_name_tool -change "@rpath/$DYLIB_NAME" "@executable_path/Frameworks/$DYLIB_NAME" "$GITHUB_WORKSPACE/custom_dylibs/libSvtAv1EncApp.dylib"
+
+      - name: Build Native FFmpeg & FFprobe with libsvtav1
+        run: |
+          git clone --depth 1 https://ffmpeg.org
+          cd ffmpeg
+          IOS_ERR_HEADER=$(find "$GITHUB_WORKSPACE" -name "ios_error.h" | head -n 1)
+          IOS_INC_DIR=$(dirname "$IOS_ERR_HEADER")
+          IOS_SYS_FRAMEWORK=$(find "$GITHUB_WORKSPACE" -name "ios_system.framework" | head -n 1)
+          IOS_SYS_DIR=$(dirname "$IOS_SYS_FRAMEWORK")
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+
+          sed -i '' '1i\
+          #include "ios_error.h"\
+          ' fftools/ffmpeg.c fftools/ffprobe.c
+
+          export PKG_CONFIG_PATH="$GITHUB_WORKSPACE/sysroot/lib/pkgconfig"
+
+          ./configure \
+            --prefix="$GITHUB_WORKSPACE/sysroot" \
+            --enable-cross-compile \
+            --target-os=darwin \
+            --arch=arm64 \
+            --cc="xcrun -sdk iphoneos clang" \
+            --cxx="xcrun -sdk iphoneos clang++" \
+            --sysroot="$SDK_PATH" \
+            --extra-cflags="-arch arm64 -mios-version-min=15.0 -I$IOS_INC_DIR -I$GITHUB_WORKSPACE/sysroot/include" \
+            --extra-ldflags="-arch arm64 -mios-version-min=15.0 -L$GITHUB_WORKSPACE/sysroot/lib -F$IOS_SYS_DIR -framework ios_system" \
+            --enable-shared \
+            --disable-static \
+            --disable-programs \
+            --enable-ffmpeg \
+            --enable-ffprobe \
+            --disable-doc \
+            --enable-libsvtav1 \
+            --enable-videotoolbox \
+            --enable-audiotoolbox
+
+          make -j$(sysctl -n hw.ncpu)
+          make install
+
+          cp "$GITHUB_WORKSPACE/sysroot/lib"/libav*.dylib "$GITHUB_WORKSPACE/sysroot/lib"/libsw*.dylib "$GITHUB_WORKSPACE/custom_dylibs/"
+
+          xcrun -sdk iphoneos clang -shared -arch arm64 -mios-version-min=15.0 \
+            fftools/*.o -o "$GITHUB_WORKSPACE/custom_dylibs/libffmpeg.dylib" \
+            -L"$GITHUB_WORKSPACE/sysroot/lib" -lavdevice -lavfilter -lavformat -lavcodec -lswresample -lswscale -lavutil -lSvtAv1Enc \
+            -F"$IOS_SYS_DIR" -framework ios_system -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -framework CoreVideo -framework CoreFoundation -framework Security -lz -lbz2 -liconv || true
+
+      - name: Build Native 7-Zip (7zz)
+        run: |
+          git clone --depth 1 https://github.com
+          IOS_ERR_HEADER=$(find "$GITHUB_WORKSPACE" -name "ios_error.h" | head -n 1)
+          IOS_INC_DIR=$(dirname "$IOS_ERR_HEADER")
+          IOS_SYS_FRAMEWORK=$(find "$GITHUB_WORKSPACE" -name "ios_system.framework" | head -n 1)
+          IOS_SYS_DIR=$(dirname "$IOS_SYS_FRAMEWORK")
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+
+          sed -i '' '1i\
+          #include "ios_error.h"\
+          ' 7zip/CPP/7zip/UI/Console/MainAr.cpp
+
+          cd 7zip/CPP/7zip/Bundles/Alone2
+          make -f ../../cmpl_mac_arm64.mak -j$(sysctl -n hw.ncpu) \
+            CC="xcrun -sdk iphoneos clang -arch arm64 -mios-version-min=15.0 -isysroot $SDK_PATH -I$IOS_INC_DIR" \
+            CXX="xcrun -sdk iphoneos clang++ -arch arm64 -mios-version-min=15.0 -isysroot $SDK_PATH -I$IOS_INC_DIR" \
+            LDFLAGS="-shared -F$IOS_SYS_DIR -framework ios_system" || true
+
+          if [ -f b/m_arm64/7zz ]; then
+            cp b/m_arm64/7zz "$GITHUB_WORKSPACE/custom_dylibs/lib7zz.dylib"
+          fi
+
+      - name: Fix Dynamic Library Paths (@rpath)
+        run: |
+          cd "$GITHUB_WORKSPACE/custom_dylibs"
+          for dylib in *.dylib; do
+            install_name_tool -id "@executable_path/Frameworks/$dylib" "$dylib" || true
+            for dep in $(otool -L "$dylib" | awk '/@rpath|sysroot/ {print $1}'); do
+              base=$(basename "$dep")
+              install_name_tool -change "$dep" "@executable_path/Frameworks/$base" "$dylib" || true
+            done
+          done
+
+      - name: Register Commands and Build Unsigned IPA
+        run: |
+          cd "$GITHUB_WORKSPACE/a-shell"
+          PLIST="Resources/commandDictionary.plist"
+
+          /usr/libexec/PlistBuddy -c "Add :SvtAv1EncApp array" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :SvtAv1EncApp:0 string libSvtAv1EncApp.dylib" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :SvtAv1EncApp:1 string main" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :SvtAv1EncApp:2 string '[-i input] [-b output]'" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :SvtAv1EncApp:3 string file" "$PLIST"
+
+          if [ -f "$GITHUB_WORKSPACE/custom_dylibs/libffmpeg.dylib" ]; then
+            /usr/libexec/PlistBuddy -c "Delete :ffmpeg" "$PLIST" || true
+            /usr/libexec/PlistBuddy -c "Add :ffmpeg array" "$PLIST"
+            /usr/libexec/PlistBuddy -c "Add :ffmpeg:0 string libffmpeg.dylib" "$PLIST"
+            /usr/libexec/PlistBuddy -c "Add :ffmpeg:1 string main" "$PLIST"
+            /usr/libexec/PlistBuddy -c "Add :ffmpeg:2 string '[-i input] output'" "$PLIST"
+            /usr/libexec/PlistBuddy -c "Add :ffmpeg:3 string file" "$PLIST"
+          fi
+
+          if [ -f "$GITHUB_WORKSPACE/custom_dylibs/lib7zz.dylib" ]; then
+            /usr/libexec/PlistBuddy -c "Add :7zz array" "$PLIST"
+            /usr/libexec/PlistBuddy -c "Add :7zz:0 string lib7zz.dylib" "$PLIST"
+            /usr/libexec/PlistBuddy -c "Add :7zz:1 string main" "$PLIST"
+            /usr/libexec/PlistBuddy -c "Add :7zz:2 string '[a|x|l] archive'" "$PLIST"
+            /usr/libexec/PlistBuddy -c "Add :7zz:3 string file" "$PLIST"
+          fi
+
+          xcodebuild -project a-Shell.xcodeproj \
+            -scheme a-Shell-noPython \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            IPHONEOS_DEPLOYMENT_TARGET=15.0 \
+            CODE_SIGNING_ALLOWED=NO \
+            -archivePath build/a-Shell.xcarchive \
+            archive
+
+          mkdir -p build/Payload
