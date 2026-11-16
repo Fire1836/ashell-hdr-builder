@@ -27,9 +27,12 @@ jobs:
       - name: Build SVT-AV1-HDR (Library + CLI)
         run: |
           git clone --depth 1 "https://${GH_HOST}/juliobbv-p/svt-av1-hdr.git"
-          IOS_SYS_FRAMEWORK=$(find "$GITHUB_WORKSPACE/a-shell/xcfs" -path "*/ios-arm64/ios_system.framework" | head -n 1)
+          IOS_SYS_FRAMEWORK=$(find "$GITHUB_WORKSPACE/a-shell" -path "*/ios-arm64/ios_system.framework" | head -n 1)
           IOS_SYS_DIR=$(dirname "$IOS_SYS_FRAMEWORK")
-          IOS_INC_DIR="$IOS_SYS_FRAMEWORK/Headers"
+          IOS_ERROR_H=$(find "$GITHUB_WORKSPACE/a-shell" -name "ios_error.h" | head -n 1)
+          IOS_INC_DIR=$(dirname "$IOS_ERROR_H")
+          echo "Found ios_system.framework at: $IOS_SYS_FRAMEWORK"
+          echo "Found ios_error.h at: $IOS_ERROR_H"
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           
           MAIN_C=$(find svt-av1-hdr -iname "*app*main*.c" | head -n 1)
