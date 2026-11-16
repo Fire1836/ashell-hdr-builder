@@ -94,14 +94,14 @@ jobs:
           DYLIB_NAME=$(basename $(ls "$GITHUB_WORKSPACE/custom_dylibs"/libSvtAv1Enc.*.dylib | head -n 1))
           install_name_tool -id "@rpath/$DYLIB_NAME" "$GITHUB_WORKSPACE/custom_dylibs/$DYLIB_NAME"
           install_name_tool -change "@rpath/$DYLIB_NAME" "@executable_path/Frameworks/$DYLIB_NAME" "$GITHUB_WORKSPACE/custom_dylibs/libSvtAv1EncApp.dylib"
-
+          
       - name: Build Native FFmpeg & FFprobe with libsvtav1
         run: |
-          git clone --depth 1 "https://${FFMPEG_HOST}/ffmpeg.git"
+          git clone --depth 1 "https://${FFMPEG_HOST:-git.ffmpeg.org}/ffmpeg.git"
           cd ffmpeg
-          IOS_SYS_FRAMEWORK=$(find "$GITHUB_WORKSPACE/a-shell/xcfs" -path "*/ios-arm64/ios_system.framework" | head -n 1)
+          IOS_SYS_FRAMEWORK=$(find "$GITHUB_WORKSPACE" -path "*/ios-arm64/ios_system.framework" | head -n 1)
           IOS_SYS_DIR=$(dirname "$IOS_SYS_FRAMEWORK")
-          IOS_INC_DIR="$IOS_SYS_FRAMEWORK/Headers"
+          IOS_INC_DIR="$GITHUB_WORKSPACE/ios_headers"
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
 
           sed -i '' '1i\
@@ -118,7 +118,7 @@ jobs:
             --cc="xcrun -sdk iphoneos clang" \
             --cxx="xcrun -sdk iphoneos clang++" \
             --sysroot="$SDK_PATH" \
-            --extra-cflags="-arch arm64 -mios-version-min=15.0 -I$IOS_INC_DIR -I$GITHUB_WORKSPACE/sysroot/include" \
+            --extra-cflags="-arch arm64 -mios-version-min=15.0 -O3 -w -I$IOS_INC_DIR -I$GITHUB_WORKSPACE/sysroot/include" \
             --extra-ldflags="-arch arm64 -mios-version-min=15.0 -L$GITHUB_WORKSPACE/sysroot/lib -F$IOS_SYS_DIR -framework ios_system" \
             --enable-shared \
             --disable-static \
@@ -126,6 +126,7 @@ jobs:
             --enable-ffmpeg \
             --enable-ffprobe \
             --disable-doc \
+            --disable-debug \
             --enable-libsvtav1 \
             --enable-videotoolbox \
             --enable-audiotoolbox
@@ -135,11 +136,17 @@ jobs:
 
           cp "$GITHUB_WORKSPACE/sysroot/lib"/libav*.dylib "$GITHUB_WORKSPACE/sysroot/lib"/libsw*.dylib "$GITHUB_WORKSPACE/custom_dylibs/"
 
-          FFMPEG_OBJS=$(ls fftools/*.o | grep -v 'ffprobe')
+          COMMON_OBJS=$(find fftools -name "*.o" ! -name "ffmpeg.o" ! -name "ffprobe.o")
+
           xcrun -sdk iphoneos clang -shared -arch arm64 -mios-version-min=15.0 \
-            $FFMPEG_OBJS -o "$GITHUB_WORKSPACE/custom_dylibs/libffmpeg.dylib" \
+            fftools/ffmpeg.o $COMMON_OBJS -o "$GITHUB_WORKSPACE/custom_dylibs/libffmpeg.dylib" \
             -L"$GITHUB_WORKSPACE/sysroot/lib" -lavdevice -lavfilter -lavformat -lavcodec -lswresample -lswscale -lavutil -lSvtAv1Enc \
-            -F"$IOS_SYS_DIR" -framework ios_system -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -framework CoreVideo -framework CoreFoundation -framework Security -lz -lbz2 -liconv || true
+            -F"$IOS_SYS_DIR" -framework ios_system -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -framework CoreVideo -framework CoreFoundation -framework Security -lz -lbz2 -liconv
+
+          xcrun -sdk iphoneos clang -shared -arch arm64 -mios-version-min=15.0 \
+            fftools/ffprobe.o $COMMON_OBJS -o "$GITHUB_WORKSPACE/custom_dylibs/libffprobe.dylib" \
+            -L"$GITHUB_WORKSPACE/sysroot/lib" -lavdevice -lavfilter -lavformat -lavcodec -lswresample -lswscale -lavutil -lSvtAv1Enc \
+            -F"$IOS_SYS_DIR" -framework ios_system -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -framework CoreVideo -framework CoreFoundation -framework Security -lz -lbz2 -liconv
 
       - name: Build Native 7-Zip (7zz)
         run: |
