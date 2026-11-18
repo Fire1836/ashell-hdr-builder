@@ -114,10 +114,20 @@ jobs:
             -DSVT_AV1_LTO=OFF \
             -DCMAKE_C_FLAGS="-O3 -mcpu=apple-a16 -I$HDRS" \
             -DCMAKE_CXX_FLAGS="-O3 -mcpu=apple-a16" \
-            -DCMAKE_EXE_LINKER_FLAGS="-dynamiclib -F$IOS_SYS_DIR -framework ios_system"
+            -DCMAKE_EXE_LINKER_FLAGS="-dynamiclib -F$IOS_SYS_DIR -framework ios_system" \
+            2>&1 | tee "$GITHUB_WORKSPACE/svt-configure.log"
 
-          cmake --build build-ios --config Release -j"$(sysctl -n hw.ncpu)"
-          cmake --install build-ios --config Release
+          # Build with the output captured, and print the actual errors if it fails.
+          BLOG="$GITHUB_WORKSPACE/svt-build.log"
+          if ! cmake --build build-ios --config Release -j"$(sysctl -n hw.ncpu)" > "$BLOG" 2>&1; then
+            echo "=============== FIRST ERRORS ==============="
+            grep -nE "error:|Error [0-9]|undefined|ld: |fatal" "$BLOG" | head -60 || true
+            echo "=============== LAST 80 LINES =============="
+            tail -n 80 "$BLOG"
+            exit 1
+          fi
+          tail -n 5 "$BLOG"
+          cmake --install build-ios --config Release 2>&1 | tail -n 20
 
           APP=$(find build-ios Bin -name SvtAv1EncApp -type f 2>/dev/null | head -n 1)
           echo "CLI binary: $APP"
@@ -189,8 +199,15 @@ jobs:
             --enable-libsvtav1 \
             --enable-videotoolbox --enable-audiotoolbox
 
-          make -j"$(sysctl -n hw.ncpu)"
-          make install
+          FLOG="$GITHUB_WORKSPACE/ffmpeg-build.log"
+          if ! make -j"$(sysctl -n hw.ncpu)" > "$FLOG" 2>&1; then
+            echo "=============== FIRST ERRORS ==============="
+            grep -nE "error:|Error [0-9]|undefined|ld: |fatal" "$FLOG" | head -60 || true
+            echo "=============== LAST 80 LINES =============="
+            tail -n 80 "$FLOG"
+            exit 1
+          fi
+          make install > /dev/null
 
           # Turn the fftools objects into loadable command dylibs.
           FFMPEG_OBJS=$(find fftools -name '*.o' ! -name 'ffprobe.o' | sort)
@@ -416,6 +433,7 @@ jobs:
           name: build-logs
           if-no-files-found: ignore
           path: |
+            svt-configure.log
+            svt-build.log
+            ffmpeg-build.log
             ffmpeg/ffbuild/config.log
-            svt-av1-hdr/build-ios/CMakeFiles/CMakeConfigureLog.yaml
-            svt-av1-hdr/build-ios/CMakeFiles/CMakeError.log
