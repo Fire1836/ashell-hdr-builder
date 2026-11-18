@@ -261,7 +261,11 @@ jobs:
             --disable-programs --enable-ffmpeg --enable-ffprobe \
             --disable-doc --disable-debug \
             --enable-libsvtav1 \
-            --enable-videotoolbox --enable-audiotoolbox
+            --enable-videotoolbox --enable-audiotoolbox \
+            --disable-outdev=audiotoolbox \
+            --disable-avfoundation \
+            --disable-coreimage \
+            --disable-appkit
 
           FLOG="$GITHUB_WORKSPACE/ffmpeg-build.log"
           if ! make -j"$(sysctl -n hw.ncpu)" > "$FLOG" 2>&1; then
