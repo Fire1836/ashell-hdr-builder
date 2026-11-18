@@ -65,6 +65,70 @@ jobs:
           echo "--- ios_error.h (first 60 lines) ---"
           head -n 60 "$HDRS/ios_error.h"
 
+          # ios_error.h #defines function-like macros (abort(), getwchar(), iswprint(a)...).
+          # If a system header is first included AFTER it, the iOS SDK declarations break.
+          # So this wrapper pulls in the system headers FIRST (include guards make later
+          # includes no-ops), then ios_error.h. Everything we patch includes this wrapper.
+          cat > "$HDRS/ios_wrap.h" <<'EOF'
+          #ifndef IOS_WRAP_H
+          #define IOS_WRAP_H
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <stdint.h>
+          #include <inttypes.h>
+          #include <stdbool.h>
+          #include <stdarg.h>
+          #include <stddef.h>
+          #include <limits.h>
+          #include <float.h>
+          #include <errno.h>
+          #include <ctype.h>
+          #include <wchar.h>
+          #include <wctype.h>
+          #include <locale.h>
+          #include <math.h>
+          #include <time.h>
+          #include <setjmp.h>
+          #include <signal.h>
+          #include <unistd.h>
+          #include <fcntl.h>
+          #include <dirent.h>
+          #include <libgen.h>
+          #include <poll.h>
+          #include <pthread.h>
+          #include <termios.h>
+          #include <pwd.h>
+          #include <grp.h>
+          #include <spawn.h>
+          #include <sys/types.h>
+          #include <sys/stat.h>
+          #include <sys/time.h>
+          #include <sys/select.h>
+          #include <sys/ioctl.h>
+          #include <sys/wait.h>
+          #include <sys/resource.h>
+          #include <sys/param.h>
+          #include <sys/mman.h>
+          #include <sys/uio.h>
+          #include <sys/socket.h>
+          #include <netdb.h>
+          #include <netinet/in.h>
+          #include <arpa/inet.h>
+          #ifdef __cplusplus
+          #include <cstdlib>
+          #include <cstdio>
+          #include <cstring>
+          #include <cwchar>
+          #include <cwctype>
+          #include <string>
+          #include <vector>
+          #include <new>
+          #endif
+          #include "ios_error.h"
+          #endif
+          EOF
+
           # Libraries must not target a HIGHER iOS than the app does.
           MIN_OS=$(grep -ho 'IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*' "$ASHELL"/*.xcodeproj/project.pbxproj | awk '{print $3}' | sort -V | head -n1 || true)
           MIN_OS=${MIN_OS:-16.0}
@@ -88,7 +152,7 @@ jobs:
           #    Only the APP sources get this, NOT the encoder library: the
           #    library logs from worker threads where thread_stderr is NULL.
           find Source/App -name '*.c' | while read -r f; do
-            { echo '#include "ios_error.h"'; cat "$f"; } > "$f.tmp" && mv "$f.tmp" "$f"
+            { echo '#include "ios_wrap.h"'; cat "$f"; } > "$f.tmp" && mv "$f.tmp" "$f"
           done
 
           # 2) ios_system finds the command with dlsym("main"): make sure it is exported.
@@ -142,7 +206,7 @@ jobs:
           cat > "$HDRS/ios_ffmpeg_log.h" <<'EOF'
           #ifndef IOS_FFMPEG_LOG_H
           #define IOS_FFMPEG_LOG_H
-          #include "ios_error.h"
+          #include "ios_wrap.h"
           #include <stdio.h>
           #include <stdarg.h>
           #include <pthread.h>
@@ -171,7 +235,7 @@ jobs:
 
           # ios_error.h in every fftools file; the log hook + exported main in the two entry points.
           find fftools -name '*.c' ! -name ffmpeg.c ! -name ffprobe.c | while read -r f; do
-            { echo '#include "ios_error.h"'; cat "$f"; } > "$f.tmp" && mv "$f.tmp" "$f"
+            { echo '#include "ios_wrap.h"'; cat "$f"; } > "$f.tmp" && mv "$f.tmp" "$f"
           done
           for f in fftools/ffmpeg.c fftools/ffprobe.c; do
             { echo '#include "ios_ffmpeg_log.h"'; cat "$f"; } > "$f.tmp" && mv "$f.tmp" "$f"
@@ -230,8 +294,8 @@ jobs:
           git clone --depth 1 https://github.com/ip7z/7zip.git
           cd 7zip/CPP/7zip/Bundles/Alone2
 
-          CC_CMD="xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=$MIN_OS -I$HDRS -include ios_error.h"
-          CXX_CMD="xcrun -sdk iphoneos clang++ -arch arm64 -miphoneos-version-min=$MIN_OS -I$HDRS -include ios_error.h"
+          CC_CMD="xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=$MIN_OS -I$HDRS -include ios_wrap.h"
+          CXX_CMD="xcrun -sdk iphoneos clang++ -arch arm64 -miphoneos-version-min=$MIN_OS -I$HDRS -include ios_wrap.h"
 
           # USE_ASM= : the .S files cannot take the force-included C header.
           make -f ../../cmpl_mac_arm64.mak -j"$(sysctl -n hw.ncpu)" \
