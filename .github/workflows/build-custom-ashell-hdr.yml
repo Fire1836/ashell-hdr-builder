@@ -301,6 +301,15 @@ jobs:
           CC_CMD="xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=$MIN_OS -I$HDRS -include ios_wrap.h"
           CXX_CMD="xcrun -sdk iphoneos clang++ -arch arm64 -miphoneos-version-min=$MIN_OS -I$HDRS -include ios_wrap.h"
 
+          # 7-Zip's makefiles hardcode -mmacosx-version-min (clashes with the iOS min flag)
+          # and compile with -Werror -Weverything. Patch both out.
+          MAKES=$(grep -rlE 'mmacosx-version-min|Werror|Weverything' ../../ --include='*.mak' || true)
+          echo "patching: $MAKES"
+          for m in $MAKES; do
+            sed -i '' -e "s/-mmacosx-version-min=[0-9.]*/-miphoneos-version-min=$MIN_OS/g" \
+                      -e 's/-Werror//g' -e 's/-Weverything//g' -e 's/-Wfatal-errors//g' "$m"
+          done
+
           # USE_ASM= : the .S files cannot take the force-included C header.
           make -f ../../cmpl_mac_arm64.mak -j"$(sysctl -n hw.ncpu)" \
             USE_ASM= CC="$CC_CMD" CXX="$CXX_CMD" \
@@ -468,6 +477,53 @@ jobs:
           echo "App bundle: $APP"
           mkdir -p "$APP/Frameworks"
           cp -R "$STAGE"/* "$APP/Frameworks/"
+
+          # ---- make sure the dictionaries a-Shell ACTUALLY loads point at our commands ----
+          # The bundled a-Shell ships its own ffmpeg/ffprobe frameworks; if its dictionary wins
+          # over the file we edited earlier, the old ffmpeg (no SVT-AV1) is what runs.
+          echo "=== frameworks in app that look like ffmpeg/svt ==="
+          ls "$APP/Frameworks" | grep -iE 'ffm|ffprobe|svt|7zz' || true
+          python3 - "$APP" <<'PY'
+          import plistlib, os, sys
+          app = sys.argv[1]; out = os.environ["OUT"]
+          style = os.environ.get("CMD_STYLE", "fwpath")
+          ours = {"SvtAv1EncApp": "libSvtAv1EncApp", "ffmpeg": "libffmpeg",
+                  "ffprobe": "libffprobe", "7zz": "lib7zz"}
+          avail = {c: l for c, l in ours.items() if os.path.exists(f"{out}/{l}.dylib")}
+          def first(l):
+              return {"fwpath": f"{l}.framework/{l}", "dylib": f"{l}.dylib", "bare": l}[style]
+          dicts = 0
+          for root, _, files in os.walk(app):
+              for f in files:
+                  if not f.endswith(".plist") or f == "Info.plist":
+                      continue
+                  p = os.path.join(root, f)
+                  try:
+                      with open(p, "rb") as fh:
+                          d = plistlib.load(fh)
+                  except Exception:
+                      continue
+                  if not isinstance(d, dict):
+                      continue
+                  cmds = [v for v in d.values() if isinstance(v, list) and len(v) >= 4
+                          and all(isinstance(x, str) for x in v[:4])]
+                  if len(cmds) < 5:
+                      continue
+                  dicts += 1
+                  rel = os.path.relpath(p, app)
+                  print(f"--- command dictionary: {rel}  ({len(cmds)} commands)")
+                  for c in ("ffmpeg", "ffprobe", "SvtAv1EncApp", "7zz"):
+                      print(f"    before {c}: {d.get(c)}")
+                  for c, l in avail.items():
+                      d[c] = [first(l), "main", "", "file"]
+                  with open(p, "wb") as fh:
+                      plistlib.dump(d, fh, fmt=plistlib.FMT_XML)
+                  for c in avail:
+                      print(f"    after  {c}: {d[c]}")
+          print(f"command dictionaries patched: {dicts}")
+          if dicts == 0:
+              print("::warning::no command dictionary found inside the built app")
+          PY
 
           # ---- diagnostics for launch crashes ----
           echo "=== Info.plist: MinimumOSVersion / extensions ==="
