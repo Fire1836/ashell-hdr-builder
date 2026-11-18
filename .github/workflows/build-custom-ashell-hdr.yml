@@ -152,7 +152,7 @@ jobs:
           #    Only the APP sources get this, NOT the encoder library: the
           #    library logs from worker threads where thread_stderr is NULL.
           find Source/App -name '*.c' | while read -r f; do
-            { echo '#include "ios_wrap.h"'; cat "$f"; } > "$f.tmp" && mv "$f.tmp" "$f"
+            { echo '#include "ios_wrap.h"'; perl -pe 's/^\xEF\xBB\xBF// if $. == 1' "$f"; } > "$f.tmp" && mv "$f.tmp" "$f"
           done
 
           # 2) ios_system finds the command with dlsym("main"): make sure it is exported.
@@ -235,7 +235,7 @@ jobs:
 
           # ios_error.h in every fftools file; the log hook + exported main in the two entry points.
           find fftools -name '*.c' ! -name ffmpeg.c ! -name ffprobe.c | while read -r f; do
-            { echo '#include "ios_wrap.h"'; cat "$f"; } > "$f.tmp" && mv "$f.tmp" "$f"
+            { echo '#include "ios_wrap.h"'; perl -pe 's/^\xEF\xBB\xBF// if $. == 1' "$f"; } > "$f.tmp" && mv "$f.tmp" "$f"
           done
           for f in fftools/ffmpeg.c fftools/ffprobe.c; do
             { echo '#include "ios_ffmpeg_log.h"'; cat "$f"; } > "$f.tmp" && mv "$f.tmp" "$f"
