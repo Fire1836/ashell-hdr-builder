@@ -1,0 +1,421 @@
+name: Build a-Shell (SVT-AV1-HDR + FFmpeg + 7zz) for iPad A16
+
+on:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  ASHELL: ${{ github.workspace }}/a-shell
+  SYSROOT: ${{ github.workspace }}/sysroot
+  OUT: ${{ github.workspace }}/custom_libs
+  STAGE: ${{ github.workspace }}/stage
+  HDRS: ${{ github.workspace }}/ios_headers
+  FFMPEG_BRANCH: release/7.1
+
+jobs:
+  build-ipa:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      # ------------------------------------------------------------------
+      - name: Clone a-Shell and download its frameworks
+        run: |
+          git clone --depth 1 https://github.com/holzschu/a-shell.git
+          cd a-shell
+          git submodule update --init SwiftTerm
+          ./downloadFrameworks.sh --jobs 4
+
+      # ------------------------------------------------------------------
+      - name: Locate ios_system, pick deployment target
+        run: |
+          brew install pkg-config || true
+          mkdir -p "$OUT" "$STAGE" "$SYSROOT" "$HDRS"
+
+          IOS_SYS_FW=$(find "$ASHELL" -type d -path "*ios-arm64/ios_system.framework" | head -n 1)
+          if [ -z "$IOS_SYS_FW" ]; then
+            echo "::error::ios_system.framework (device slice) not found"
+            find "$ASHELL" -iname "*ios_system*" | head -20
+            exit 1
+          fi
+          IOS_SYS_DIR=$(dirname "$IOS_SYS_FW")
+
+          # We need the REAL ios_error.h (it redirects printf/stdout/stderr/exit).
+          # A hand-written stub is not good enough, so fail if it is missing.
+          # The prebuilt xcframework usually ships WITHOUT ios_error.h, so look in the
+          # tree first, then fetch it from the ios_system source at the same release tag.
+          IOS_ERROR_H=$(find "$ASHELL" -name ios_error.h | head -n 1 || true)
+          if [ -n "$IOS_ERROR_H" ]; then
+            cp "$IOS_ERROR_H" "$HDRS/ios_error.h"
+          else
+            echo "ios_error.h not in tree, downloading from holzschu/ios_system"
+            for ref in v3.0.5 master; do
+              if curl -fsSL "https://raw.githubusercontent.com/holzschu/ios_system/$ref/ios_error.h" -o "$HDRS/ios_error.h"; then
+                echo "got ios_error.h from ref $ref"
+                break
+              fi
+            done
+          fi
+          if [ ! -s "$HDRS/ios_error.h" ] || ! grep -q thread_stdout "$HDRS/ios_error.h"; then
+            echo "::error::could not obtain a valid ios_error.h"
+            exit 1
+          fi
+          echo "--- ios_error.h (first 60 lines) ---"
+          head -n 60 "$HDRS/ios_error.h"
+
+          # Libraries must not target a HIGHER iOS than the app does.
+          MIN_OS=$(grep -ho 'IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*' "$ASHELL"/*.xcodeproj/project.pbxproj | awk '{print $3}' | sort -V | head -n1 || true)
+          MIN_OS=${MIN_OS:-16.0}
+
+          {
+            echo "IOS_SYS_DIR=$IOS_SYS_DIR"
+            echo "SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)"
+            echo "MIN_OS=$MIN_OS"
+          } >> "$GITHUB_ENV"
+          echo "ios_system: $IOS_SYS_DIR"
+          echo "ios_error.h: $IOS_ERROR_H"
+          echo "Deployment target: $MIN_OS"
+
+      # ------------------------------------------------------------------
+      - name: Build SVT-AV1-HDR (library + CLI as a loadable dylib)
+        run: |
+          git clone --depth 1 https://github.com/juliobbv-p/svt-av1-hdr.git
+          cd svt-av1-hdr
+
+          # 1) Route stdout/stderr/printf/exit of the CLI through ios_system.
+          #    Only the APP sources get this, NOT the encoder library: the
+          #    library logs from worker threads where thread_stderr is NULL.
+          find Source/App -name '*.c' | while read -r f; do
+            { echo '#include "ios_error.h"'; cat "$f"; } > "$f.tmp" && mv "$f.tmp" "$f"
+          done
+
+          # 2) ios_system finds the command with dlsym("main"): make sure it is exported.
+          grep -rlE '^int main\(' Source/App --include=*.c | while read -r f; do
+            echo "exporting main in $f"
+            sed -i '' -E 's/^int main\(/__attribute__((visibility("default"))) int main(/' "$f"
+          done
+
+          cmake -S . -B build-ios \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_SYSTEM_PROCESSOR=arm64 \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="$MIN_OS" \
+            -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+            -DCMAKE_MACOSX_BUNDLE=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$SYSROOT" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_APPS=ON \
+            -DBUILD_DEC=OFF \
+            -DBUILD_TESTING=OFF \
+            -DSVT_AV1_LTO=OFF \
+            -DCMAKE_C_FLAGS="-O3 -mcpu=apple-a16 -I$HDRS" \
+            -DCMAKE_CXX_FLAGS="-O3 -mcpu=apple-a16" \
+            -DCMAKE_EXE_LINKER_FLAGS="-dynamiclib -F$IOS_SYS_DIR -framework ios_system"
+
+          cmake --build build-ios --config Release -j"$(sysctl -n hw.ncpu)"
+          cmake --install build-ios --config Release
+
+          APP=$(find build-ios Bin -name SvtAv1EncApp -type f 2>/dev/null | head -n 1)
+          echo "CLI binary: $APP"
+          test -n "$APP"
+          cp "$APP" "$OUT/libSvtAv1EncApp.dylib"
+
+      # ------------------------------------------------------------------
+      - name: Build FFmpeg + FFprobe (libsvtav1, VideoToolbox)
+        run: |
+          # Log callback that writes to the ios_system stderr of the calling command,
+          # and is safe to call from FFmpeg worker threads.
+          cat > "$HDRS/ios_ffmpeg_log.h" <<'EOF'
+          #ifndef IOS_FFMPEG_LOG_H
+          #define IOS_FFMPEG_LOG_H
+          #include "ios_error.h"
+          #include <stdio.h>
+          #include <stdarg.h>
+          #include <pthread.h>
+          #include "libavutil/log.h"
+          static FILE *ios_av_err;
+          static pthread_mutex_t ios_av_lock = PTHREAD_MUTEX_INITIALIZER;
+          static void ios_av_log_cb(void *ptr, int level, const char *fmt, va_list vl) {
+              static int print_prefix = 1;
+              char line[2048];
+              level &= 0xff;
+              if (level > av_log_get_level()) return;
+              pthread_mutex_lock(&ios_av_lock);
+              av_log_format_line(ptr, level, fmt, vl, line, sizeof(line), &print_prefix);
+              if (ios_av_err) { fputs(line, ios_av_err); fflush(ios_av_err); }
+              pthread_mutex_unlock(&ios_av_lock);
+          }
+          static void ios_av_log_init(void) {
+              ios_av_err = thread_stderr;
+              av_log_set_callback(ios_av_log_cb);
+          }
+          #endif
+          EOF
+
+          git clone --depth 1 --branch "$FFMPEG_BRANCH" https://git.ffmpeg.org/ffmpeg.git
+          cd ffmpeg
+
+          # ios_error.h in every fftools file; the log hook + exported main in the two entry points.
+          find fftools -name '*.c' ! -name ffmpeg.c ! -name ffprobe.c | while read -r f; do
+            { echo '#include "ios_error.h"'; cat "$f"; } > "$f.tmp" && mv "$f.tmp" "$f"
+          done
+          for f in fftools/ffmpeg.c fftools/ffprobe.c; do
+            { echo '#include "ios_ffmpeg_log.h"'; cat "$f"; } > "$f.tmp" && mv "$f.tmp" "$f"
+            perl -0pi -e 's/^(int main\(int argc, char \*\*argv\)\s*\{)/__attribute__((visibility("default"))) $1\n    ios_av_log_init();/m' "$f"
+            grep -q ios_av_log_init "$f" || { echo "::error::could not patch main() in $f"; exit 1; }
+          done
+
+          export PKG_CONFIG_LIBDIR="$SYSROOT/lib/pkgconfig"
+
+          ./configure \
+            --prefix="$SYSROOT" \
+            --enable-cross-compile \
+            --target-os=darwin \
+            --arch=arm64 \
+            --cc="xcrun -sdk iphoneos clang" \
+            --cxx="xcrun -sdk iphoneos clang++" \
+            --sysroot="$SDK_PATH" \
+            --pkg-config="$(command -v pkg-config)" \
+            --install-name-dir="@rpath" \
+            --extra-cflags="-arch arm64 -miphoneos-version-min=$MIN_OS -O3 -w -I$HDRS -I$SYSROOT/include" \
+            --extra-ldflags="-arch arm64 -miphoneos-version-min=$MIN_OS -L$SYSROOT/lib -F$IOS_SYS_DIR -framework ios_system" \
+            --enable-shared --disable-static --enable-pic \
+            --disable-programs --enable-ffmpeg --enable-ffprobe \
+            --disable-doc --disable-debug \
+            --enable-libsvtav1 \
+            --enable-videotoolbox --enable-audiotoolbox
+
+          make -j"$(sysctl -n hw.ncpu)"
+          make install
+
+          # Turn the fftools objects into loadable command dylibs.
+          FFMPEG_OBJS=$(find fftools -name '*.o' ! -name 'ffprobe.o' | sort)
+          FFPROBE_OBJS="fftools/ffprobe.o fftools/cmdutils.o fftools/opt_common.o $(find fftools/textformat -name '*.o' 2>/dev/null || true)"
+
+          LINK="-dynamiclib -arch arm64 -miphoneos-version-min=$MIN_OS -isysroot $SDK_PATH"
+          LIBS="-L$SYSROOT/lib -lavdevice -lavfilter -lavformat -lavcodec -lswresample -lswscale -lavutil \
+                -F$IOS_SYS_DIR -framework ios_system \
+                -framework CoreMedia -framework VideoToolbox -framework AudioToolbox \
+                -framework CoreVideo -framework CoreFoundation -framework Security \
+                -lz -lbz2 -liconv -lm"
+
+          xcrun -sdk iphoneos clang $LINK $FFMPEG_OBJS -o "$OUT/libffmpeg.dylib" $LIBS
+          xcrun -sdk iphoneos clang $LINK $FFPROBE_OBJS -o "$OUT/libffprobe.dylib" $LIBS
+
+      # ------------------------------------------------------------------
+      - name: Build 7-Zip (7zz) - optional, may fail without stopping the build
+        continue-on-error: true
+        run: |
+          git clone --depth 1 https://github.com/ip7z/7zip.git
+          cd 7zip/CPP/7zip/Bundles/Alone2
+
+          CC_CMD="xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=$MIN_OS -I$HDRS -include ios_error.h"
+          CXX_CMD="xcrun -sdk iphoneos clang++ -arch arm64 -miphoneos-version-min=$MIN_OS -I$HDRS -include ios_error.h"
+
+          # USE_ASM= : the .S files cannot take the force-included C header.
+          make -f ../../cmpl_mac_arm64.mak -j"$(sysctl -n hw.ncpu)" \
+            USE_ASM= CC="$CC_CMD" CXX="$CXX_CMD" \
+            LDFLAGS="-dynamiclib -F$IOS_SYS_DIR -framework ios_system"
+
+          BIN=$(find . -name 7zz -type f | head -n 1)
+          echo "7zz: $BIN"
+          test -n "$BIN"
+          cp "$BIN" "$OUT/lib7zz.dylib"
+
+      # ------------------------------------------------------------------
+      - name: Collect dependency dylibs and sanity-check everything
+        run: |
+          # Copy real files under the name their install-name uses (no duplicate symlinks).
+          for f in "$SYSROOT"/lib/*.dylib; do
+            id=$(otool -D "$f" | tail -n 1)
+            cp -L "$f" "$OUT/$(basename "$id")"
+          done
+          ls -la "$OUT"
+
+          fail=0
+          for f in "$OUT"/*.dylib; do
+            n=$(basename "$f")
+            archs=$(lipo -archs "$f")
+            plat=$(vtool -show-build "$f" | awk '/platform/ {print $2; exit}')
+            echo "$n  archs=$archs  platform=$plat"
+            [ "$archs" = "arm64" ] || { echo "::error::$n is not arm64-only"; fail=1; }
+            [ "$plat" = "IOS" ]    || { echo "::error::$n is not an iOS device build (platform=$plat)"; fail=1; }
+          done
+          for n in libSvtAv1EncApp libffmpeg libffprobe lib7zz; do
+            f="$OUT/$n.dylib"
+            [ -f "$f" ] || { echo "::warning::$n.dylib missing"; continue; }
+            if nm -gU "$f" | grep -q ' T _main$'; then
+              echo "$n exports _main: OK"
+            else
+              echo "::error::$n does not export a public _main (ios_system will not find it)"
+              [ "$n" = "lib7zz" ] || fail=1
+            fi
+          done
+          exit $fail
+
+      # ------------------------------------------------------------------
+      - name: Register commands in a-Shell's command dictionary
+        run: |
+          python3 - <<'PY'
+          import plistlib, os, sys, glob
+
+          ashell, out = os.environ["ASHELL"], os.environ["OUT"]
+          cands = [p for p in glob.glob(f"{ashell}/**/*ommandDictionary*.plist", recursive=True)
+                   if "/xcfs/" not in p and "/build/" not in p]
+          print("plist candidates:", *cands, sep="\n  ")
+          path = next((p for p in cands if os.path.basename(p) == "commandDictionary.plist"),
+                      cands[0] if cands else None)
+          if not path:
+              sys.exit("ERROR: no commandDictionary plist found in the a-shell tree")
+          print("editing:", path)
+
+          with open(path, "rb") as f:
+              d = plistlib.load(f)
+
+          firsts = [v[0] for v in d.values() if isinstance(v, list) and v and isinstance(v[0], str)]
+          print("sample existing entries:")
+          for k, v in list(d.items())[:8]:
+              print("  ", k, v)
+
+          if any(".framework/" in s for s in firsts):
+              style = "fwpath"      # libfoo.framework/libfoo
+          elif any(s.endswith(".dylib") for s in firsts):
+              style = "dylib"       # libfoo.dylib
+          else:
+              style = "bare"        # libfoo
+          print("command style:", style)
+
+          cmds = {"SvtAv1EncApp": "libSvtAv1EncApp", "ffmpeg": "libffmpeg",
+                  "ffprobe": "libffprobe", "7zz": "lib7zz"}
+          for cmd, lib in cmds.items():
+              if not os.path.exists(f"{out}/{lib}.dylib"):
+                  print("skip (not built):", cmd)
+                  continue
+              first = {"fwpath": f"{lib}.framework/{lib}", "dylib": f"{lib}.dylib", "bare": lib}[style]
+              d[cmd] = [first, "main", "", "file"]
+              print("registered:", cmd, d[cmd])
+
+          with open(path, "wb") as f:
+              plistlib.dump(d, f, fmt=plistlib.FMT_XML)
+
+          with open(os.environ["GITHUB_ENV"], "a") as f:
+              f.write(f"CMD_STYLE={style}\n")
+          PY
+          grep -c "commandDictionary" "$ASHELL"/*.xcodeproj/project.pbxproj || true
+
+      # ------------------------------------------------------------------
+      - name: Package libs (frameworks so sideloaders sign them) and fix paths
+        run: |
+          cd "$OUT"
+          if [ "$CMD_STYLE" = "dylib" ]; then
+            # loose dylibs in Frameworks/
+            for f in *.dylib; do cp "$f" "$STAGE/$f"; done
+            for f in "$STAGE"/*.dylib; do
+              install_name_tool -id "@rpath/$(basename "$f")" "$f"
+              for dep in $(otool -L "$f" | tail -n +2 | awk '{print $1}'); do
+                b=$(basename "$dep")
+                if [ "$dep" != "@rpath/$b" ] && [ -f "$OUT/$b" ]; then
+                  install_name_tool -change "$dep" "@rpath/$b" "$f"
+                fi
+              done
+              codesign --force --sign - "$f"
+            done
+          else
+            # one .framework per dylib: dots in names become underscores
+            for f in *.dylib; do
+              b="${f%.dylib}"; fw="${b//./_}"
+              d="$STAGE/$fw.framework"; mkdir -p "$d"
+              cp "$f" "$d/$fw"
+              cat > "$d/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleExecutable</key><string>$fw</string>
+            <key>CFBundleIdentifier</key><string>com.custom.ashell.${fw//_/-}</string>
+            <key>CFBundleName</key><string>$fw</string>
+            <key>CFBundlePackageType</key><string>FMWK</string>
+            <key>CFBundleVersion</key><string>1</string>
+            <key>CFBundleShortVersionString</key><string>1.0</string>
+            <key>MinimumOSVersion</key><string>$MIN_OS</string>
+            <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+          </dict></plist>
+          EOF
+            done
+            for f in *.dylib; do
+              b="${f%.dylib}"; fw="${b//./_}"
+              bin="$STAGE/$fw.framework/$fw"
+              install_name_tool -id "@rpath/$fw.framework/$fw" "$bin"
+              for dep in $(otool -L "$bin" | tail -n +2 | awk '{print $1}'); do
+                db=$(basename "$dep")
+                if [ -f "$OUT/$db" ]; then
+                  dfw="${db%.dylib}"; dfw="${dfw//./_}"
+                  install_name_tool -change "$dep" "@rpath/$dfw.framework/$dfw" "$bin"
+                fi
+              done
+              codesign --force --sign - "$STAGE/$fw.framework"
+            done
+          fi
+          ls -la "$STAGE"
+          echo "--- leftover non-system paths (should be none) ---"
+          find "$STAGE" -type f -perm +111 -exec otool -L {} \; | grep -E 'sysroot|/Users/|/Volumes/' || echo "none"
+
+      # ------------------------------------------------------------------
+      - name: Build unsigned IPA
+        run: |
+          cd "$ASHELL"
+          xcodebuild -list -project a-Shell.xcodeproj || true
+
+          # NOTE: no IPHONEOS_DEPLOYMENT_TARGET override - use the project's own.
+          xcodebuild -quiet \
+            -project a-Shell.xcodeproj \
+            -scheme a-Shell-noPython \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            -archivePath build/a-Shell.xcarchive \
+            archive
+
+          APP=$(find build/a-Shell.xcarchive/Products/Applications -maxdepth 1 -name '*.app' | head -n 1)
+          echo "App bundle: $APP"
+          mkdir -p "$APP/Frameworks"
+          cp -R "$STAGE"/* "$APP/Frameworks/"
+
+          # ---- diagnostics for launch crashes ----
+          echo "=== Info.plist: MinimumOSVersion / extensions ==="
+          /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP/Info.plist" || true
+          find "$APP" -name '*.appex' -maxdepth 3 || true
+          echo "=== entitlement files in the project (sideloaders can't grant app groups etc.) ==="
+          find "$ASHELL" -name '*.entitlements' -not -path '*/xcfs/*' -exec sh -c 'echo "--- $1"; cat "$1"' _ {} \;
+          echo "=== main binary @rpath deps that are NOT present in Frameworks/ ==="
+          EXE="$APP/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
+          otool -L "$EXE" | awk '/@rpath/ {print $1}' | while read -r dep; do
+            rel="${dep#@rpath/}"
+            [ -e "$APP/Frameworks/$rel" ] || echo "MISSING: $dep"
+          done
+
+          mkdir -p build/Payload
+          cp -R "$APP" build/Payload/
+          cd build
+          zip -qry "$GITHUB_WORKSPACE/a-Shell-Custom-HDR.ipa" Payload
+
+      # ------------------------------------------------------------------
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: a-Shell-Custom-HDR
+          path: a-Shell-Custom-HDR.ipa
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          if-no-files-found: ignore
+          path: |
+            ffmpeg/ffbuild/config.log
+            svt-av1-hdr/build-ios/CMakeFiles/CMakeConfigureLog.yaml
+            svt-av1-hdr/build-ios/CMakeFiles/CMakeError.log
